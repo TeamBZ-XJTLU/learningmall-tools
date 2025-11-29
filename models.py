@@ -157,6 +157,39 @@ class MultiChoiceQuestion(Question):
 
 
 @dataclass
+class ClozeQuestion(Question):
+    """Moodle cloze (embedded answer) question."""
+
+    name: str
+    question_html: str
+    general_feedback_html: str = ""
+    defaultgrade: float = 1.0
+    penalty: float = 0.3333333
+    files: List[EmbeddedFile] = field(default_factory=list)
+
+    def to_xml(self) -> etree._Element:
+        q = etree.Element("question", type="cloze")
+
+        name_el = etree.SubElement(q, "name")
+        add_simple_text(name_el, "text", self.name)
+
+        questiontext = etree.SubElement(q, "questiontext", format="html")
+        add_cdata_text(questiontext, self.question_html)
+        for file in self.files:
+            questiontext.append(file.to_xml())
+
+        general_feedback = etree.SubElement(q, "generalfeedback", format="html")
+        add_cdata_text(general_feedback, self.general_feedback_html)
+
+        add_simple_text(q, "defaultgrade", f"{self.defaultgrade:.7f}")
+        add_simple_text(q, "penalty", f"{self.penalty:.7f}")
+        add_simple_text(q, "hidden", "0")
+        add_simple_text(q, "idnumber", "")
+
+        return q
+
+
+@dataclass
 class Quiz:
     questions: Sequence[Question]
 
