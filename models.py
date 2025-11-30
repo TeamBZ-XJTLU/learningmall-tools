@@ -85,6 +85,7 @@ class DescriptionQuestion(Question):
     question_html: str
     defaultgrade: float = 0.0
     penalty: float = 0.0
+    files: List[EmbeddedFile] = field(default_factory=list)
 
     def to_xml(self) -> etree._Element:
         q = etree.Element("question", type="description")
@@ -92,6 +93,8 @@ class DescriptionQuestion(Question):
         add_simple_text(name_el, "text", self.name)
         questiontext = etree.SubElement(q, "questiontext", format="html")
         add_cdata_text(questiontext, self.question_html)
+        for file in self.files:
+            questiontext.append(file.to_xml())
         general_feedback = etree.SubElement(q, "generalfeedback", format="html")
         add_cdata_text(general_feedback, "")
         add_simple_text(q, "defaultgrade", f"{self.defaultgrade:.7f}")

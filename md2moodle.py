@@ -7,11 +7,14 @@ Markdown format:
   - `Category: $course$/top/MyCategory`
   - `Description: Intro text shown above questions`
   - `CodeMode: html` (default) or `CodeMode: image` to choose how fenced code blocks render
+  - `ImageMaxWidth: 600` (optional) to cap rendered images (markdown and code block images) in pixels
 - Each question starts with a level-2 heading `## Question title`
 - Body text follows until answers.
 - Answers are markdown list items using checkboxes:
   - `- [x] Correct answer text`
   - `- [ ] Incorrect answer text`
+- Description-only blocks are supported by adding `Type: Description` under a heading
+  to render text without answers.
 - Images in the body like `![alt](path/to/image.png)` are embedded and rewritten to `@@PLUGINFILE@@/image.png`.
 - Cloze (fill-in-the-blank) questions are supported by adding `Type: Cloze` under the question title
   and writing blanks as `{{answer}}` (or `{{answer1|answer2}}` for multiple fully-correct answers).
@@ -41,17 +44,13 @@ import sys
 import textwrap
 from io import BytesIO
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 import markdown
 from pygments import highlight
 from pygments.formatters import HtmlFormatter, ImageFormatter
 from pygments.formatters.img import FontNotFound
 from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
-
-REPO_ROOT = Path(__file__).resolve().parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from models import (
     AnswerOption,
@@ -75,14 +74,19 @@ def markdown_to_html(text: str) -> str:
     return markdown.markdown(text, extensions=["extra"])
 
 
-def extract_images(md: str) -> tuple[str, List[EmbeddedFile]]:
+def extract_images(md: str, image_max_width: Optional[int] = None) -> tuple[str, List[EmbeddedFile]]:
     files: List[EmbeddedFile] = []
+
+    def img_tag(src: str) -> str:
+        if image_max_width:
+            return f"<img src='{src}' style='max-width:{image_max_width}px; height:auto;' />"
+        return f"<img src='{src}' />"
 
     def replace(match: re.Match) -> str:
         path_str = match.group(1)
         path = Path(path_str)
         files.append(EmbeddedFile.from_path_with_name(path, name=path.name))
-        return f"<img src='@@PLUGINFILE@@/{path.name}' />"
+        return img_tag(f"@@PLUGINFILE@@/{path.name}")
 
     html_like = IMAGE_PATTERN.sub(replace, md)
     return html_like, files
@@ -143,7 +147,9 @@ def render_code_to_html(code: str, language: Optional[str]) -> str:
     return restore(highlighted)
 
 
-def convert_code_blocks(md: str, code_mode: str = "image") -> tuple[str, List[EmbeddedFile]]:
+def convert_code_blocks(
+    md: str, code_mode: str = "image", image_max_width: Optional[int] = None
+) -> tuple[str, List[EmbeddedFile]]:
     """
     Replace fenced code blocks either with <img> tags (default) or inline HTML.
     code_mode: "image" or "html".
@@ -157,16 +163,20 @@ def convert_code_blocks(md: str, code_mode: str = "image") -> tuple[str, List[Em
             return render_code_to_html(code, language)
         image_name = f"code-{len(files) + 1}.png"
         files.append(render_code_to_image(code, language, image_name))
+        if image_max_width:
+            return f"<img src='@@PLUGINFILE@@/{image_name}' style='max-width:{image_max_width}px; height:auto;' />"
         return f"<img src='@@PLUGINFILE@@/{image_name}' />"
 
     replaced = CODE_BLOCK_PATTERN.sub(replace, md)
     return replaced, files
 
 
-def process_rich_text(md: str, code_mode: str = "image") -> tuple[str, List[EmbeddedFile]]:
+def process_rich_text(
+    md: str, code_mode: str = "image", image_max_width: Optional[int] = None
+) -> tuple[str, List[EmbeddedFile]]:
     """Render markdown segment with code blocks and image embedding."""
-    md_with_code, code_files = convert_code_blocks(md, code_mode=code_mode)
-    md_with_images, image_files = extract_images(md_with_code)
+    md_with_code, code_files = convert_code_blocks(md, code_mode=code_mode, image_max_width=image_max_width)
+    md_with_images, image_files = extract_images(md_with_code, image_max_width=image_max_width)
     html = markdown_to_html(md_with_images)
     return html, code_files + image_files
 
@@ -198,6 +208,7 @@ def parse_markdown(md_text: str) -> Quiz:
     category: Optional[str] = None
     description_text: Optional[str] = None
     default_code_mode = "html"
+    default_image_max_width: Optional[int] = None
     questions: List[Question] = []
 
     # metadata
@@ -211,6 +222,13 @@ def parse_markdown(md_text: str) -> Quiz:
             value = line.split(":", 1)[1].strip().lower()
             if value in {"html", "image"}:
                 default_code_mode = value
+        elif line.lower().startswith("imagemaxwidth:"):
+            raw = line.split(":", 1)[1].strip()
+            if raw:
+                try:
+                    default_image_max_width = int(raw)
+                except ValueError:
+                    raise ValueError("ImageMaxWidth must be an integer.")
         else:
             break
         idx += 1
@@ -225,6 +243,7 @@ def parse_markdown(md_text: str) -> Quiz:
         files: List[EmbeddedFile],
         question_type: str,
         code_mode: str,
+        image_max_width: Optional[int],
     ):
         if not title:
             return
@@ -235,7 +254,9 @@ def parse_markdown(md_text: str) -> Quiz:
 
         if is_cloze:
             cloze_md, blanks = convert_cloze_placeholders(body_md)
-            html_body, rich_files = process_rich_text(cloze_md, code_mode="html")
+            html_body, rich_files = process_rich_text(
+                cloze_md, code_mode="html", image_max_width=image_max_width
+            )
             defaultgrade = float(blanks or 1)
             question = ClozeQuestion(
                 name=title.strip(),
@@ -244,10 +265,22 @@ def parse_markdown(md_text: str) -> Quiz:
                 files=files + rich_files,
             )
             questions.append(question)
+        elif question_type == "description":
+            html_body, rich_files = process_rich_text(
+                body_md, code_mode=code_mode, image_max_width=image_max_width
+            )
+            question = DescriptionQuestion(
+                name=title.strip(),
+                question_html=html_body,
+                files=files + rich_files,
+            )
+            questions.append(question)
         else:
             if not answers:
                 raise ValueError(f"Question '{title}' has no answers.")
-            html_body, rich_files = process_rich_text(body_md, code_mode=code_mode)
+            html_body, rich_files = process_rich_text(
+                body_md, code_mode=code_mode, image_max_width=image_max_width
+            )
             question = MultiChoiceQuestion(
                 name=title.strip(),
                 question_html=html_body,
@@ -263,6 +296,7 @@ def parse_markdown(md_text: str) -> Quiz:
     current_files: List[EmbeddedFile] = []
     current_type: str = "multichoice"
     current_code_mode: str = default_code_mode
+    current_image_max_width: Optional[int] = default_image_max_width
 
     def consume_answer(start_line: str, start_idx: int) -> tuple[str, int]:
         content_lines = [start_line]
@@ -308,6 +342,7 @@ def parse_markdown(md_text: str) -> Quiz:
                     current_files,
                     current_type,
                     current_code_mode,
+                    current_image_max_width,
                 )
             current_title = line[3:].strip()
             current_body = []
@@ -315,6 +350,7 @@ def parse_markdown(md_text: str) -> Quiz:
             current_files = []
             current_type = "multichoice"
             current_code_mode = default_code_mode
+            current_image_max_width = default_image_max_width
         elif answer_match and current_type != "cloze":
             mark = answer_match.group(1).lower()
             answer_text, next_idx = consume_answer(answer_match.group(2).strip(), idx + 1)
@@ -322,7 +358,9 @@ def parse_markdown(md_text: str) -> Quiz:
             if answer_text:
                 combined = answer_text
             fraction = 100 if mark == "x" else 0
-            html_answer, ans_files = process_rich_text(combined, code_mode=current_code_mode)
+            html_answer, ans_files = process_rich_text(
+                combined, code_mode=current_code_mode, image_max_width=current_image_max_width
+            )
             current_answers.append(AnswerOption(text=html_answer, fraction=fraction, files=ans_files))
             idx = next_idx
             continue
@@ -333,6 +371,13 @@ def parse_markdown(md_text: str) -> Quiz:
                 value = line.split(":", 1)[1].strip().lower()
                 if value in {"html", "image"}:
                     current_code_mode = value
+            elif line.strip().lower().startswith("imagemaxwidth:"):
+                raw = line.split(":", 1)[1].strip()
+                if raw:
+                    try:
+                        current_image_max_width = int(raw)
+                    except ValueError:
+                        raise ValueError("ImageMaxWidth must be an integer.")
             else:
                 current_body.append(line)
         idx += 1
@@ -345,6 +390,7 @@ def parse_markdown(md_text: str) -> Quiz:
             current_files,
             current_type,
             current_code_mode,
+            current_image_max_width,
         )
 
     if not questions:

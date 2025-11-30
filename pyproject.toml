@@ -9,4 +9,5 @@ dependencies = [
     "markdown>=3.6",
     "pygments>=2.17",
     "pillow>=10.2",
+    "PySide6>=6.10.1",
 ]
