@@ -25,6 +25,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from md2moodle import parse_markdown
+from models import CategoryQuestion, ClozeQuestion, DescriptionQuestion, MultiChoiceQuestion
 from preview import markdown_to_preview_html
 
 
@@ -87,6 +88,7 @@ class QuizEditor(QtWidgets.QWidget):
             self.load_file(path)
         self.update_preview()
         self.update_map()
+        self.update_status_bar()
 
     def apply_modern_theme(self) -> None:
         QtWidgets.QApplication.setStyle("Fusion")
@@ -183,6 +185,16 @@ class QuizEditor(QtWidgets.QWidget):
                 margin-top: 6px;
                 margin-bottom: 6px;
                 border-radius: 4px;
+            }}
+            QFrame#StatusBar {{
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 10px;
+                padding: 8px 12px;
+            }}
+            QLabel#StatusLabel {{
+                color: #1f2937;
+                font-weight: 600;
             }}
             """
         )
@@ -313,6 +325,18 @@ class QuizEditor(QtWidgets.QWidget):
         main_layout.setStretch(1, 0)
         main_layout.setStretch(2, 1)
 
+        # Status bar
+        self.status_bar = QtWidgets.QFrame()
+        self.status_bar.setObjectName("StatusBar")
+        status_layout = QtWidgets.QHBoxLayout(self.status_bar)
+        status_layout.setContentsMargins(10, 8, 10, 8)
+        status_layout.setSpacing(12)
+        self.status_label = QtWidgets.QLabel("Questions: MCQ 0 | Cloze 0 | Description 0 | Total 0")
+        self.status_label.setObjectName("StatusLabel")
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        main_layout.addWidget(self.status_bar)
+
     def load_file(self, path: Path) -> None:
         self.editor.setPlainText(path.read_text())
         self.path = path
@@ -383,6 +407,7 @@ class QuizEditor(QtWidgets.QWidget):
     def on_text_changed(self) -> None:
         self.update_preview()
         self.update_map()
+        self.update_status_bar()
 
     def update_preview(self) -> None:
         try:
@@ -425,6 +450,24 @@ class QuizEditor(QtWidgets.QWidget):
             self.map_list.setCurrentRow(new_row)
         self.map_list.blockSignals(False)
         self.highlight_section(new_row)
+
+    def update_status_bar(self) -> None:
+        """Refresh counts of question types in the status bar."""
+        md_text = self.editor.toPlainText()
+        try:
+            quiz = parse_markdown(md_text)
+        except Exception:
+            self.status_label.setText("Counts unavailable (fix Markdown to see totals)")
+            return
+
+        mcq = sum(isinstance(q, MultiChoiceQuestion) for q in quiz.questions)
+        cloze = sum(isinstance(q, ClozeQuestion) for q in quiz.questions)
+        desc = sum(isinstance(q, DescriptionQuestion) for q in quiz.questions)
+        total = sum(1 for q in quiz.questions if not isinstance(q, CategoryQuestion))
+
+        self.status_label.setText(
+            f"Questions: MCQ {mcq} | Cloze {cloze} | Description {desc} | Total {total}"
+        )
 
     def on_map_selection(self, row: int) -> None:
         if row < 0:
