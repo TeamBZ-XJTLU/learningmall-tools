@@ -27,7 +27,7 @@ uv run cli.py convert --md examples/sample-questions.md --output examples/quiz.x
 
 ## Markdown format
 - Optional metadata lines at the top:
-  - `Category: $course$/top/MyCategory`
+  - `Category: MyCategory`
   - `Description: Intro text shown above questions`
   - `CodeMode: html` (default) or `image` to render fenced code blocks as PNGs
   - `ImageMaxWidth: 600` to cap rendered images (markdown and code blocks)
