@@ -11,4 +11,5 @@ dependencies = [
     "pillow>=10.2",
     "PySide6>=6.10.1",
     "click>=8.1",
+    "openai>=2.8.1",
 ]

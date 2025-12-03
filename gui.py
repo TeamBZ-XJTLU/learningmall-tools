@@ -16,6 +16,7 @@ PySide6 is provided as an optional dependency via the `gui` extra.
 from __future__ import annotations
 
 import html
+import os
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -23,6 +24,7 @@ from typing import List, Tuple
 import md2moodle
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from openai import OpenAI
 
 from md2moodle import parse_markdown
 from models import CategoryQuestion, ClozeQuestion, DescriptionQuestion, MultiChoiceQuestion
@@ -33,6 +35,19 @@ ACCENT = "#2563eb"
 SURFACE = "#f8fafc"
 CANVAS = "#ffffff"
 TEXT_PRIMARY = "#0f172a"
+DEFAULT_MODEL = "gpt-4o-mini"
+
+AI_SYSTEM_PROMPT = (
+    "You are an AI moderator reviewing Learning Mall quiz markdown. "
+    "Check academic integrity, clarity, fairness, factual correctness, accessibility, and formatting. "
+    "Flag missing metadata, ambiguous wording, or platform-incompatible markup. "
+    "Respond concisely with bullet points of issues and suggested fixes."
+)
+
+DEFAULT_MODERATION_TASK = (
+    "Review the quiz markdown for quality, correctness, and policy risks. "
+    "List concise findings and practical fixes the author should make."
+)
 
 
 def render_markdown(md_text: str) -> str:
@@ -78,6 +93,7 @@ class QuizEditor(QtWidgets.QWidget):
     def __init__(self, path: Path | None = None):
         super().__init__()
         self.path = path
+        self.system_prompt = AI_SYSTEM_PROMPT
         self._pending_preview_row: int = -1
         self.setWindowTitle("LearningMall Markdown Editor")
         self.setObjectName("AppWindow")
@@ -232,6 +248,7 @@ class QuizEditor(QtWidgets.QWidget):
             ("New", self.new_document, True),
             ("Load Template", self.load_template, True),
             ("Validate", self.validate_document, False),
+            ("AI Moderator", self.run_ai_moderator, False),
             ("Save", self.save_file, True),
             ("Export Preview HTML", self.export_preview_html, False),
             ("Export Moodle XML", self.export_moodle_xml, False),
@@ -335,6 +352,32 @@ class QuizEditor(QtWidgets.QWidget):
         self.status_label.setObjectName("StatusLabel")
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
+
+        self.base_url_input = QtWidgets.QLineEdit(os.getenv("OPENAI_BASE_URL", ""))
+        self.base_url_input.setPlaceholderText("AI Base URL")
+        self.base_url_input.setFixedWidth(200)
+        status_layout.addWidget(QtWidgets.QLabel("Base URL:"))
+        status_layout.addWidget(self.base_url_input)
+
+        self.api_key_input = QtWidgets.QLineEdit(os.getenv("OPENAI_API_KEY", ""))
+        self.api_key_input.setPlaceholderText("API Key (optional)")
+        self.api_key_input.setEchoMode(QtWidgets.QLineEdit.PasswordEchoOnEdit)
+        self.api_key_input.setFixedWidth(180)
+        status_layout.addWidget(QtWidgets.QLabel("API Key:"))
+        status_layout.addWidget(self.api_key_input)
+
+        status_layout.addWidget(QtWidgets.QLabel("Model:"))
+        self.model_input = QtWidgets.QLineEdit(os.getenv("OPENAI_MODEL", DEFAULT_MODEL))
+        self.model_input.setPlaceholderText("Model name")
+        self.model_input.setFixedWidth(150)
+        status_layout.addWidget(self.model_input)
+
+        edit_prompt_btn = QtWidgets.QPushButton("Edit System Prompt")
+        self._style_button(edit_prompt_btn)
+        edit_prompt_btn.clicked.connect(self.edit_system_prompt)
+        status_layout.addWidget(edit_prompt_btn)
+
+        status_layout.addStretch()
         main_layout.addWidget(self.status_bar)
 
     def load_file(self, path: Path) -> None:
@@ -369,6 +412,157 @@ class QuizEditor(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Validation failed", str(exc))
             return
         QtWidgets.QMessageBox.information(self, "Validation passed", "Markdown looks valid.")
+
+    def run_ai_moderator(self) -> None:
+        """Send the current markdown to an AI moderator and display the feedback."""
+        md_text = self.editor.toPlainText().strip()
+        if not md_text:
+            QtWidgets.QMessageBox.information(self, "AI Moderator", "Add markdown content first.")
+            return
+
+        model_preview = self.model_input.text().strip() or DEFAULT_MODEL
+        base_preview = self.base_url_input.text().strip() or "OpenAI default endpoint"
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Run AI Moderator",
+            f"Run AI moderation with model '{model_preview}'\nBase URL: {base_preview}?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("AI Moderator")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        layout.addWidget(
+            QtWidgets.QLabel("Model, Base URL, and API Key are configured in the status bar.")
+        )
+
+        layout.addWidget(QtWidgets.QLabel("Task for the moderator"))
+        task_input = QtWidgets.QPlainTextEdit(DEFAULT_MODERATION_TASK)
+        task_input.setMinimumHeight(90)
+        layout.addWidget(task_input)
+
+        button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        run_btn = QtWidgets.QPushButton("Run moderation")
+        self._style_button(run_btn, primary=True)
+        button_box.addButton(run_btn, QtWidgets.QDialogButtonBox.AcceptRole)
+        button_box.rejected.connect(dialog.reject)
+        run_btn.clicked.connect(dialog.accept)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        model = self.model_input.text().strip() or DEFAULT_MODEL
+        base_url = self.base_url_input.text().strip()
+        api_key = self.api_key_input.text().strip() or None
+        task = task_input.toPlainText().strip() or DEFAULT_MODERATION_TASK
+
+        self._request_ai_feedback(md_text, model=model, base_url=base_url, api_key=api_key, task=task)
+
+    def _request_ai_feedback(
+        self, md_text: str, *, model: str, base_url: str, api_key: str | None, task: str
+    ) -> None:
+        """Call the OpenAI client and present a feedback dialog."""
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            client_kwargs = {}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            if api_key:
+                client_kwargs["api_key"] = api_key
+            elif base_url:
+                # Some local endpoints (e.g., LM Studio) do not require auth but the SDK expects a key
+                client_kwargs["api_key"] = "not-required"
+            client = OpenAI(**client_kwargs)
+            user_prompt = (
+                f"{task}\n\n"
+                "Focus on content risks, clarity, fairness, accessibility, and correctness. "
+                "Return concise bullet points with suggested fixes.\n\n"
+                "Markdown to review:\n"
+                f"{md_text}"
+            )
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+            )
+            feedback = response.choices[0].message.content if response.choices else ""
+            feedback = feedback.strip() if feedback else "No feedback returned by the model."
+        except Exception as exc:  # pragma: no cover - UI path
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QMessageBox.warning(self, "AI moderation failed", str(exc))
+            return
+        QtWidgets.QApplication.restoreOverrideCursor()
+        self.show_feedback_dialog(feedback, model=model, base_url=base_url)
+
+    def show_feedback_dialog(self, feedback: str, *, model: str, base_url: str) -> None:
+        """Display AI moderation feedback in a dedicated dialog."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("AI Moderator Feedback")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        meta = QtWidgets.QLabel(
+            f"Model: {model} | Base URL: {base_url or 'OpenAI default endpoint'}"
+        )
+        layout.addWidget(meta)
+
+        feedback_view = QtWidgets.QTextBrowser()
+        feedback_view.setOpenExternalLinks(True)
+        feedback_view.setMinimumWidth(520)
+        feedback_view.setMinimumHeight(360)
+        try:
+            feedback_view.setMarkdown(feedback)
+        except Exception:
+            feedback_view.setPlainText(feedback)
+        layout.addWidget(feedback_view)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch()
+        copy_btn = QtWidgets.QPushButton("Copy to clipboard")
+        self._style_button(copy_btn)
+        copy_btn.clicked.connect(lambda: QtWidgets.QApplication.clipboard().setText(feedback))
+        close_btn = QtWidgets.QPushButton("Close")
+        self._style_button(close_btn, primary=True)
+        close_btn.clicked.connect(dialog.accept)
+        buttons.addWidget(copy_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        dialog.exec()
+
+    def edit_system_prompt(self) -> None:
+        """Open a dialog to edit the AI system prompt."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Edit System Prompt")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        text_edit = QtWidgets.QPlainTextEdit(self.system_prompt)
+        text_edit.setMinimumHeight(200)
+        layout.addWidget(text_edit)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Cancel | QtWidgets.QDialogButtonBox.Save
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            updated = text_edit.toPlainText().strip() or AI_SYSTEM_PROMPT
+            self.system_prompt = updated
 
     def export_preview_html(self) -> None:
         target_path = self._pick_save_path(
